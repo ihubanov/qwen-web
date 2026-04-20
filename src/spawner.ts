@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { FastifyBaseLogger } from 'fastify';
 import type { AppConfig } from './config.js';
+import { buildBwrapInvocation } from './sandbox.js';
 
 export interface SessionOptions {
   userId: string;
@@ -121,6 +122,12 @@ export class SessionManager {
     const { file, args } = this.buildInvocation(opts);
     const env = this.buildEnv(opts.home);
 
+    // Prevent git from walking above the per-user workspace when looking for
+    // a .git directory. Without this, `git log` / `git status` / etc. inside
+    // the workspace can discover the wrapper's own repo (or any ancestor
+    // repo) and leak its history to the user.
+    env['GIT_CEILING_DIRECTORIES'] = opts.cwd;
+
     const pty = ptySpawn(file, args, {
       name: 'xterm-256color',
       cols: opts.cols,
@@ -173,15 +180,31 @@ export class SessionManager {
     file: string;
     args: string[];
   } {
-    const args: string[] = [];
+    const qwenArgs: string[] = [];
     if (opts.disabledSlashCommands && opts.disabledSlashCommands.length > 0) {
-      args.push('--disabled-slash-commands', opts.disabledSlashCommands.join(','));
+      qwenArgs.push('--disabled-slash-commands', opts.disabledSlashCommands.join(','));
     }
+
+    if (this.config.sandbox.mode === 'bwrap') {
+      const invocation = buildBwrapInvocation({
+        nodeBin: process.execPath,
+        qwenCodeRoot: this.config.qwenCodeRoot,
+        qwenCodeBin: this.config.qwenCodeBin,
+        home: opts.home,
+        workspace: opts.cwd,
+        qwenArgs,
+        roBinds: this.config.sandbox.roBinds,
+        extraRoBinds: this.config.sandbox.extraRoBinds,
+        shareNet: this.config.sandbox.shareNet,
+      });
+      return { file: invocation.cmd, args: invocation.args };
+    }
+
     if (this.config.qwenCodeBin) {
-      return { file: process.execPath, args: [this.config.qwenCodeBin, ...args] };
+      return { file: process.execPath, args: [this.config.qwenCodeBin, ...qwenArgs] };
     }
     const cliEntry = `${this.config.qwenCodeRoot}/packages/cli`;
-    return { file: process.execPath, args: [cliEntry, ...args] };
+    return { file: process.execPath, args: [cliEntry, ...qwenArgs] };
   }
 
   private buildEnv(home: string): Record<string, string> {

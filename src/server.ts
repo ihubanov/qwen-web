@@ -14,6 +14,7 @@ import { UserRepo } from './auth/users.js';
 import { SessionRepo } from './auth/sessions.js';
 import { registerAuthHook } from './auth/middleware.js';
 import { seedAdminIfMissing } from './auth/seed.js';
+import { assertBwrapAvailable } from './sandbox.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = resolve(__dirname, '..', 'public');
@@ -37,6 +38,14 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     logger: { level: config.logLevel },
     trustProxy: true,
   });
+
+  if (config.sandbox.mode === 'bwrap') {
+    assertBwrapAvailable();
+    app.log.info(
+      { mode: 'bwrap', shareNet: config.sandbox.shareNet },
+      'sandbox enabled',
+    );
+  }
 
   const db = await openDatabase(config.dbPath);
   const users = new UserRepo(db);

@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { DEFAULT_RO_BINDS } from './sandbox.js';
 
 const schema = z.object({
   PORT: z.coerce.number().int().positive().default(3900),
@@ -20,6 +21,13 @@ const schema = z.object({
   // Otherwise a random password is generated and printed to stderr.
   ADMIN_INITIAL_PASSWORD: z.string().optional(),
   ROLE_USER_DISABLED_SLASH_COMMANDS: z.string().optional(),
+  SANDBOX_MODE: z.enum(['none', 'bwrap']).default('none'),
+  SANDBOX_RO_BINDS: z.string().optional(),
+  SANDBOX_EXTRA_RO_BINDS: z.string().optional(),
+  SANDBOX_SHARE_NET: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
   COOKIE_SECRET: z.string().min(16, 'COOKIE_SECRET must be >=16 chars'),
   QWEN_AUTH_TYPE: z
     .enum(['openai', 'anthropic', 'qwen-oauth', 'gemini', 'vertex-ai'])
@@ -64,6 +72,12 @@ export interface AppConfig {
     adminInitialPassword: string | null;
   };
   roleBaselines: { user: string[]; admin: string[] };
+  sandbox: {
+    mode: 'none' | 'bwrap';
+    roBinds: string[];
+    extraRoBinds: string[];
+    shareNet: boolean;
+  };
   upstreamAuth: {
     type: RawConfig['QWEN_AUTH_TYPE'];
     env: Record<string, string>;
@@ -102,6 +116,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
+  const splitCsv = (s: string | undefined): string[] =>
+    (s ?? '')
+      .split(',')
+      .map((x) => x.trim())
+      .filter((x) => x.length > 0);
+
+  const roBinds =
+    raw.SANDBOX_RO_BINDS !== undefined
+      ? splitCsv(raw.SANDBOX_RO_BINDS)
+      : [...DEFAULT_RO_BINDS];
+
   return {
     port: raw.PORT,
     host: raw.HOST,
@@ -122,6 +147,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       adminInitialPassword: raw.ADMIN_INITIAL_PASSWORD ?? null,
     },
     roleBaselines: { user: userBaseline, admin: [] },
+    sandbox: {
+      mode: raw.SANDBOX_MODE,
+      roBinds,
+      extraRoBinds: splitCsv(raw.SANDBOX_EXTRA_RO_BINDS),
+      shareNet: raw.SANDBOX_SHARE_NET,
+    },
     upstreamAuth: { type: raw.QWEN_AUTH_TYPE, env: upstreamEnv },
     limits: { perUser: raw.MAX_SESSIONS_PER_USER, total: raw.MAX_SESSIONS_TOTAL },
     logLevel: raw.LOG_LEVEL,
