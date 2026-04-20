@@ -8,38 +8,46 @@
   <link rel="icon" href="data:," />
   <style>
     :root { color-scheme: dark; }
-    html, body { margin: 0; padding: 0; height: 100%; background: #0b0d12; color: #d8dee9; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    body { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+    html, body { margin: 0; padding: 0; height: 100%; width: 100%; background: #0b0d12; color: #d8dee9; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow: hidden; }
+    body { display: grid; grid-template-rows: auto 1fr; height: 100vh; height: 100dvh; max-width: 100vw; }
+    #term, header { min-width: 0; }
+    #term { overflow: hidden; }
+    .xterm { width: 100%; height: 100%; }
     header {
-      display: flex; gap: 0.75rem; align-items: center;
+      display: flex; flex-wrap: wrap;
+      gap: 0.4rem 0.75rem; align-items: center;
       padding: 0.45rem 0.9rem; background: #1b1f27; border-bottom: 1px solid #2a303c;
       font-size: 0.85rem;
     }
     header h1 { font-size: 0.9rem; margin: 0; font-weight: 500; }
-    header button {
-      background: #2a6; color: #fff; border: 0; padding: 0.3rem 0.75rem;
-      border-radius: 4px; cursor: pointer; font: inherit;
-    }
-    header button.secondary { background: #444c5c; }
-    header button[disabled] { opacity: 0.45; cursor: not-allowed; }
+    header .spacer { flex: 1 0 0; }
     header .status { opacity: 0.75; }
-    #term {
-      padding: 0.25rem;
-      background: #000;
-    }
+    header .me { font-size: 0.8rem; opacity: 0.75; }
+    header a { color: #8fb4d8; font-size: 0.8rem; text-decoration: none; }
+    header a:hover { text-decoration: underline; }
+    #term { padding: 0.25rem; background: #000; min-height: 0; }
     #term .xterm-viewport::-webkit-scrollbar { width: 10px; }
     #term .xterm-viewport::-webkit-scrollbar-thumb { background: #2a303c; }
+    @media (max-width: 520px) {
+      header { padding: 0.4rem 0.6rem; gap: 0.3rem 0.6rem; font-size: 0.8rem; }
+      header h1 { font-size: 0.85rem; }
+      header .status { width: 100%; order: 99; }
+      header .me { font-size: 0.75rem; }
+      #term { padding: 0; }
+    }
   </style>
 </head>
 <body>
 <header>
   <h1>qwen-web</h1>
   <span class="status" id="status">idle</span>
-  <span id="me" style="margin-left: auto; font-size: 0.8rem; opacity: 0.75;"></span>
-  <a id="admin-link" href="/admin.html" style="color: #8fb4d8; font-size: 0.8rem; margin-left: 0.75rem; display: none;">admin</a>
-  <a id="logout-link" href="#" style="color: #8fb4d8; font-size: 0.8rem; margin-left: 0.75rem; display: none;">logout</a>
+  <span class="spacer"></span>
+  <span class="me" id="me"></span>
+  <a id="admin-link" href="/admin.html" style="display: none;">admin</a>
+  <a id="logout-link" href="#" style="display: none;">logout</a>
 </header>
 <div id="term"></div>
+<script src="/orientation.js"></script>
 <script src="/vendor/xterm/lib/xterm.js"></script>
 <script src="/vendor/xterm-addon-fit/lib/addon-fit.js"></script>
 <script src="/vendor/xterm-addon-web-links/lib/addon-web-links.js"></script>
@@ -75,10 +83,20 @@
   const termEl = $('term');
   const statusEl = $('status');
 
+  // Pick a font size that keeps the qwen TUI legible at narrow widths.
+  // The qwen banner + approval dialogs get painful below ~40 cols.
+  const pickFontSize = () => {
+    const w = Math.max(320, window.innerWidth || 0);
+    if (w < 380) return 10;
+    if (w < 520) return 11;
+    if (w < 720) return 12;
+    return 13;
+  };
+
   const term = new Terminal({
     cursorBlink: true,
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
-    fontSize: 13,
+    fontSize: pickFontSize(),
     lineHeight: 1.15,
     theme: {
       background: '#000000',
@@ -93,14 +111,30 @@
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon());
   term.open(termEl);
-  fit.fit();
-  term.writeln('\x1b[90m[qwen-web] idle — click Connect to start a session.\x1b[0m');
+
+  const doFit = () => {
+    if (!termEl.isConnected) return;
+    // Clear any leftover inline size on xterm's own wrapper — fit.fit() or
+    // a prior term.resize() may have set it, and those inline pixel values
+    // prevent the element from growing back when the viewport expands
+    // (rotation portrait → landscape). Letting CSS drive the layout before
+    // re-measuring produces reliable cols/rows.
+    const xt = termEl.querySelector('.xterm');
+    if (xt) { xt.style.width = ''; xt.style.height = ''; }
+    try { fit.fit(); }
+    catch (err) { console.warn('[qwen-web] fit failed:', err); }
+  };
+  // Fit once after the first paint so the grid has settled its 1fr row,
+  // otherwise the initial canvas ends up wider than the viewport on narrow
+  // screens and you get a clipped terminal.
+  requestAnimationFrame(() => requestAnimationFrame(doFit));
 
   let ws = null;
   let ready = false;
   let shouldReconnect = true;
   let reconnectAttempt = 0;
   let reconnectTimer = null;
+  let resetOnNextConnect = false;
 
   const setStatus = (text) => { statusEl.textContent = text; };
 
@@ -109,10 +143,45 @@
     ws.send(JSON.stringify({ type: '__resize', cols: term.cols, rows: term.rows }));
   };
 
-  window.addEventListener('resize', () => {
-    fit.fit();
+  // Refit is intentionally aggressive. fit.fit() reads xterm's measured
+  // character cell width — which is stale right after a font-size change
+  // (xterm remeasures on the next render frame). So we call it up to three
+  // times across two RAFs and a short timeout, which covers:
+  //   - the initial guess on the current (maybe stale) cell metrics
+  //   - after the renderer has had a frame to remeasure the new font
+  //   - after CSS grid / viewport rotation has fully settled (rAF isn't
+  //     always enough in DevTools RDM rotation)
+  const applyFontAndFit = () => {
+    const target = pickFontSize();
+    if (term.options.fontSize !== target) term.options.fontSize = target;
+    doFit();
     sendResize();
-  });
+  };
+
+  let refitScheduled = false;
+  const scheduleRefit = () => {
+    if (refitScheduled) return;
+    refitScheduled = true;
+    requestAnimationFrame(() => {
+      applyFontAndFit();
+      requestAnimationFrame(() => {
+        applyFontAndFit();
+        setTimeout(() => {
+          applyFontAndFit();
+          refitScheduled = false;
+        }, 120);
+      });
+    });
+  };
+
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(scheduleRefit).observe(termEl);
+  }
+  window.addEventListener('resize', scheduleRefit);
+  window.addEventListener('orientationchange', scheduleRefit);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', scheduleRefit);
+  }
 
   term.onData((data) => {
     if (!ws || ws.readyState !== 1 || !ready) return;
@@ -121,7 +190,13 @@
 
   const connect = () => {
     if (ws) return;
-    fit.fit();
+    if (resetOnNextConnect) {
+      // Full xterm wipe on orientation-triggered reconnects so we don't
+      // carry over content that was painted at the pre-rotation cols/rows.
+      resetOnNextConnect = false;
+      try { term.reset(); term.clear(); } catch { /* ignore */ }
+    }
+    doFit();
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/session';
     setStatus(reconnectAttempt > 0 ? `reconnecting (attempt ${reconnectAttempt + 1})…` : 'connecting…');
     ws = new WebSocket(wsUrl);
@@ -185,6 +260,25 @@
   window.addEventListener('beforeunload', () => {
     shouldReconnect = false;
     if (ws) { try { ws.close(); } catch {} }
+  });
+
+  // Rotation handler: we prefer reconnect over full page reload since the
+  // xterm canvas / auth state / assets are all expensive to rebuild. On
+  // rotate we: cancel the default reload, reset backoff, close the WS
+  // (auto-reconnect logic will fire), and tell `connect()` to wipe the
+  // xterm buffer so the new PTY paints on a blank canvas.
+  window.addEventListener('qwen-web-orientation-change', (ev) => {
+    ev.preventDefault();
+    resetOnNextConnect = true;
+    reconnectAttempt = 0;
+    clearTimeout(reconnectTimer);
+    if (ws) {
+      try { ws.close(); } catch { /* already closed */ }
+      // close handler will schedule the next connect
+    } else {
+      // No active WS, just reconnect immediately.
+      connect();
+    }
   });
 
   connect();
