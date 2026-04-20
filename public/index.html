@@ -34,8 +34,6 @@
 <body>
 <header>
   <h1>qwen-web</h1>
-  <button id="connect">Connect</button>
-  <button id="disconnect" class="secondary" disabled>Disconnect</button>
   <span class="status" id="status">idle</span>
   <span id="me" style="margin-left: auto; font-size: 0.8rem; opacity: 0.75;"></span>
   <a id="admin-link" href="/admin.html" style="color: #8fb4d8; font-size: 0.8rem; margin-left: 0.75rem; display: none;">admin</a>
@@ -76,8 +74,6 @@
   const $ = (id) => document.getElementById(id);
   const termEl = $('term');
   const statusEl = $('status');
-  const connectBtn = $('connect');
-  const disconnectBtn = $('disconnect');
 
   const term = new Terminal({
     cursorBlink: true,
@@ -102,12 +98,11 @@
 
   let ws = null;
   let ready = false;
+  let shouldReconnect = true;
+  let reconnectAttempt = 0;
+  let reconnectTimer = null;
 
   const setStatus = (text) => { statusEl.textContent = text; };
-  const setConnected = (connected) => {
-    connectBtn.disabled = connected;
-    disconnectBtn.disabled = !connected;
-  };
 
   const sendResize = () => {
     if (!ws || ws.readyState !== 1 || !ready) return;
@@ -124,27 +119,26 @@
     ws.send(new TextEncoder().encode(data));
   });
 
-  connectBtn.addEventListener('click', () => {
+  const connect = () => {
     if (ws) return;
     fit.fit();
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/session';
+    setStatus(reconnectAttempt > 0 ? `reconnecting (attempt ${reconnectAttempt + 1})…` : 'connecting…');
     ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
-    setStatus('connecting…');
 
     ws.addEventListener('open', () => {
+      reconnectAttempt = 0;
       ws.send(JSON.stringify({
         type: '__start',
         cols: term.cols,
         rows: term.rows,
       }));
       setStatus('waiting for pty…');
-      setConnected(true);
     });
 
     ws.addEventListener('message', (ev) => {
       if (typeof ev.data === 'string') {
-        // Control frame — always JSON from the server.
         let msg;
         try { msg = JSON.parse(ev.data); } catch { return; }
         if (msg?.type !== '__meta') return;
@@ -156,31 +150,44 @@
           term.writeln(`\r\n\x1b[90m[qwen-web] pty exited code=${msg.code} signal=${msg.signal ?? '—'}\x1b[0m`);
         } else if (msg.kind === 'error') {
           term.writeln(`\r\n\x1b[31m[qwen-web] error: ${msg.message}\x1b[0m`);
+          // Auth-related errors: don't loop-reconnect, bounce to login.
+          if (msg.code === 'unauthorized' || msg.code === 'account_disabled') {
+            shouldReconnect = false;
+            setTimeout(() => location.replace('/login.html'), 400);
+          }
         }
         return;
       }
-      // Binary frame — raw PTY output bytes.
       const decoded = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(ev.data));
       term.write(decoded);
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (ev) => {
       ws = null;
       ready = false;
-      setConnected(false);
-      setStatus('idle');
+      if (!shouldReconnect) {
+        setStatus('disconnected');
+        return;
+      }
+      // Exponential backoff, capped at 15s.
+      const delay = Math.min(15000, 500 * 2 ** Math.min(reconnectAttempt, 5));
+      reconnectAttempt += 1;
+      setStatus(`disconnected — reconnecting in ${Math.round(delay / 1000)}s`);
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, delay);
     });
 
     ws.addEventListener('error', () => {
-      term.writeln('\r\n\x1b[31m[qwen-web] websocket error\x1b[0m');
+      // The close handler will fire right after; backoff lives there.
     });
+  };
+
+  window.addEventListener('beforeunload', () => {
+    shouldReconnect = false;
+    if (ws) { try { ws.close(); } catch {} }
   });
 
-  disconnectBtn.addEventListener('click', () => {
-    if (!ws) return;
-    try { ws.send(JSON.stringify({ type: '__close' })); } catch {}
-    try { ws.close(); } catch {}
-  });
+  connect();
 })().catch((err) => { console.error('init failed', err); });
 </script>
 </body>
