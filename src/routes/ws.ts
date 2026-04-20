@@ -1,15 +1,15 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { WebSocket, RawData } from 'ws';
 import type { AppConfig } from '../config.js';
 import type { SessionManager, QwenPtySession } from '../spawner.js';
 import { SpawnLimitError } from '../spawner.js';
 import { provisionUser, type UserProfile } from '../provision.js';
+import type { UserRepo } from '../auth/users.js';
 
 interface StartFrame {
   type: '__start';
   cols?: number;
   rows?: number;
-  disabledSlashCommands?: string[];
 }
 
 interface ResizeFrame {
@@ -24,12 +24,43 @@ interface CloseFrame {
 
 type ControlFrame = StartFrame | ResizeFrame | CloseFrame;
 
-function resolveUser(): UserProfile {
+function resolveProfile(
+  config: AppConfig,
+  req: FastifyRequest,
+): UserProfile | { error: string } {
+  if (config.auth.mode === 'anonymous') {
+    const baseline = config.roleBaselines.user;
+    return {
+      userId: 'anonymous',
+      authType: config.upstreamAuth.type,
+      disabledSlashCommands: baseline,
+    };
+  }
+  const user = req.user;
+  if (!user) return { error: 'unauthorized' };
+  if (user.disabled) return { error: 'account_disabled' };
+  const baseline = config.roleBaselines[user.role] ?? [];
+  const effective = mergeDisabled(baseline, user.disabledSlashCommands);
   return {
-    userId: 'anonymous',
-    authType: 'openai',
-    disabledSlashCommands: [],
+    userId: `u${user.id}_${user.username}`,
+    authType: config.upstreamAuth.type,
+    disabledSlashCommands: effective,
   };
+}
+
+function mergeDisabled(
+  base: readonly string[],
+  extra: readonly string[],
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of [...base, ...extra]) {
+    const key = v.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(v.trim());
+  }
+  return out;
 }
 
 function sendMeta(
@@ -53,11 +84,12 @@ export function registerWsRoutes(
   app: FastifyInstance,
   config: AppConfig,
   manager: SessionManager,
+  _users: UserRepo,
 ): void {
   app.get(
     '/ws/session',
     { websocket: true },
-    async (socket: WebSocket) => {
+    async (socket: WebSocket, req: FastifyRequest) => {
       let session: QwenPtySession | null = null;
 
       const cleanup = async () => {
@@ -107,14 +139,16 @@ export function registerWsRoutes(
             return;
           }
           try {
-            const profile = resolveUser();
-            const clientDisabled = frame.disabledSlashCommands ?? [];
-            if (clientDisabled.length > 0) {
-              profile.disabledSlashCommands = [
-                ...profile.disabledSlashCommands,
-                ...clientDisabled,
-              ];
+            const resolved = resolveProfile(config, req);
+            if ('error' in resolved) {
+              sendMeta(socket, 'error', {
+                message: resolved.error,
+                code: resolved.error,
+              });
+              try { socket.close(4401, resolved.error); } catch { /* already closed */ }
+              return;
             }
+            const profile = resolved;
             const { home, workspace } = await provisionUser(config, profile);
             const cols = clampDim(frame.cols, 120, 20, 400);
             const rows = clampDim(frame.rows, 32, 8, 200);

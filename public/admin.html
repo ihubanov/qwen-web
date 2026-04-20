@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>qwen-web · admin</title>
+  <link rel="icon" href="data:," />
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; padding: 0; background: #0b0d12; color: #d8dee9; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    body { min-height: 100vh; }
+    header { display: flex; gap: 0.75rem; align-items: center; padding: 0.5rem 0.9rem; background: #1b1f27; border-bottom: 1px solid #2a303c; font-size: 0.85rem; }
+    header h1 { font-size: 0.9rem; margin: 0; font-weight: 500; }
+    header a { color: #8fb4d8; text-decoration: none; margin-left: auto; }
+    header a:hover { text-decoration: underline; }
+    main { padding: 1rem; display: grid; gap: 1.5rem; max-width: 1100px; margin: 0 auto; }
+    h2 { font-size: 0.95rem; margin: 0 0 0.6rem; font-weight: 500; border-bottom: 1px solid #2a303c; padding-bottom: 0.35rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.45rem 0.55rem; border-bottom: 1px solid #2a303c; vertical-align: middle; }
+    th { font-weight: 500; opacity: 0.7; }
+    input, select, button { background: #0b0d12; color: #d8dee9; border: 1px solid #2a303c; border-radius: 3px; padding: 0.3rem 0.5rem; font: inherit; font-size: 0.8rem; }
+    button { background: #2a6; color: #fff; border: 0; cursor: pointer; }
+    button.secondary { background: #444c5c; }
+    button.danger { background: #8a3a3a; }
+    button[disabled] { opacity: 0.45; cursor: not-allowed; }
+    .msg { font-size: 0.8rem; margin: 0.4rem 0; }
+    .msg.err { color: #ff7a7a; }
+    .msg.ok { color: #92d18a; }
+    .create-form { display: grid; grid-template-columns: 1fr 1fr 1fr 2fr auto; gap: 0.5rem; align-items: end; }
+    .create-form label { display: block; font-size: 0.75rem; opacity: 0.7; margin-bottom: 0.2rem; }
+    .create-form input, .create-form select { width: 100%; box-sizing: border-box; }
+    .role-admin { color: #ffd37d; }
+    .disabled { opacity: 0.5; text-decoration: line-through; }
+    .actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+    .pill { font-size: 0.7rem; padding: 0.08rem 0.4rem; border-radius: 10px; border: 1px solid #2a303c; display: inline-block; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>qwen-web · admin</h1>
+  <span id="me"></span>
+  <a href="/">← terminal</a>
+  <a href="#" id="logout" style="margin-left: 0.75rem;">logout</a>
+</header>
+<main>
+  <section>
+    <h2>Create user</h2>
+    <div class="msg" id="create-msg"></div>
+    <form class="create-form" id="create-form">
+      <div><label>username</label><input id="c-username" required pattern="[A-Za-z0-9._-]+" /></div>
+      <div><label>password</label><input id="c-password" type="password" required minlength="8" /></div>
+      <div><label>role</label>
+        <select id="c-role"><option value="user">user</option><option value="admin">admin</option></select>
+      </div>
+      <div><label>disabled slash commands (comma)</label><input id="c-denylist" placeholder="init, clear" /></div>
+      <button type="submit">create</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Users</h2>
+    <div class="msg" id="list-msg"></div>
+    <table>
+      <thead>
+        <tr>
+          <th>id</th>
+          <th>username</th>
+          <th>role</th>
+          <th>status</th>
+          <th>disabled slash commands</th>
+          <th>last login</th>
+          <th>actions</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+(async () => {
+  const me = document.getElementById('me');
+
+  // Gate: must be logged-in admin, or bounce to login.
+  const meResp = await fetch('/auth/me');
+  if (!meResp.ok) { location.replace('/login.html'); return; }
+  const meJson = await meResp.json();
+  if (meJson.mode === 'anonymous') {
+    document.querySelector('main').innerHTML =
+      '<p style="opacity:0.7">Admin UI is not available in AUTH_MODE=anonymous.</p>';
+    return;
+  }
+  if (!meJson.user) { location.replace('/login.html'); return; }
+  if (meJson.user.role !== 'admin') {
+    document.querySelector('main').innerHTML = '<p style="color:#ff7a7a">Forbidden: admin only.</p>';
+    return;
+  }
+  me.textContent = `signed in as ${meJson.user.username} (${meJson.user.role})`;
+
+  document.getElementById('logout').addEventListener('click', async (e) => {
+    e.preventDefault();
+    await fetch('/auth/logout', { method: 'POST' });
+    location.replace('/login.html');
+  });
+
+  const msg = (id, text, cls='') => {
+    const el = document.getElementById(id);
+    el.className = 'msg ' + cls;
+    el.textContent = text;
+    if (text) setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 4000);
+  };
+
+  const rowsEl = document.getElementById('rows');
+  const render = async () => {
+    const r = await fetch('/admin/users');
+    if (!r.ok) { msg('list-msg', `Failed to load users (${r.status})`, 'err'); return; }
+    const j = await r.json();
+    rowsEl.innerHTML = '';
+    for (const u of j.users) {
+      const tr = document.createElement('tr');
+      if (u.disabled) tr.classList.add('disabled');
+      tr.innerHTML = `
+        <td>${u.id}</td>
+        <td>${u.username}</td>
+        <td class="${u.role === 'admin' ? 'role-admin' : ''}">${u.role}</td>
+        <td>${u.disabled ? '<span class="pill">disabled</span>' : '<span class="pill">active</span>'}${u.mustChangePassword ? ' <span class="pill">must change pw</span>' : ''}</td>
+        <td><input data-id="${u.id}" class="dny" value="${u.disabledSlashCommands.join(', ')}" style="width: 100%" /></td>
+        <td>${u.lastLoginAt ?? '—'}</td>
+        <td class="actions">
+          <button class="save" data-id="${u.id}">save</button>
+          <button class="secondary toggle" data-id="${u.id}" data-role="${u.role}">${u.role === 'admin' ? '→ user' : '→ admin'}</button>
+          <button class="secondary disable" data-id="${u.id}" data-disabled="${u.disabled}">${u.disabled ? 'enable' : 'disable'}</button>
+          <button class="secondary reset" data-id="${u.id}">reset pw</button>
+          <button class="danger delete" data-id="${u.id}" data-username="${u.username}">delete</button>
+        </td>`;
+      rowsEl.appendChild(tr);
+    }
+  };
+
+  const patch = async (id, body) => {
+    const r = await fetch(`/admin/users/${id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); msg('list-msg', j.error ?? `error ${r.status}`, 'err'); return false; }
+    return true;
+  };
+
+  rowsEl.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    if (btn.classList.contains('save')) {
+      const input = document.querySelector(`.dny[data-id="${id}"]`);
+      const list = input.value.split(',').map((s) => s.trim()).filter(Boolean);
+      if (await patch(id, { disabledSlashCommands: list })) {
+        msg('list-msg', `saved #${id}`, 'ok'); render();
+      }
+    } else if (btn.classList.contains('toggle')) {
+      const nextRole = btn.dataset.role === 'admin' ? 'user' : 'admin';
+      if (await patch(id, { role: nextRole })) { msg('list-msg', `role #${id} → ${nextRole}`, 'ok'); render(); }
+    } else if (btn.classList.contains('disable')) {
+      const next = btn.dataset.disabled === 'true' ? false : true;
+      if (await patch(id, { disabled: next })) { msg('list-msg', `#${id} ${next ? 'disabled' : 'enabled'}`, 'ok'); render(); }
+    } else if (btn.classList.contains('reset')) {
+      const pw = prompt('New password (>= 8 chars):');
+      if (!pw || pw.length < 8) return;
+      const r = await fetch(`/admin/users/${id}/reset-password`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ newPassword: pw, mustChangePassword: true }),
+      });
+      if (r.ok) msg('list-msg', `password reset for #${id}`, 'ok');
+      else { const j = await r.json().catch(() => ({})); msg('list-msg', j.error ?? `error ${r.status}`, 'err'); }
+    } else if (btn.classList.contains('delete')) {
+      if (!confirm(`Delete user ${btn.dataset.username}? This cannot be undone.`)) return;
+      const r = await fetch(`/admin/users/${id}`, { method: 'DELETE' });
+      if (r.ok) { msg('list-msg', `deleted #${id}`, 'ok'); render(); }
+      else { const j = await r.json().catch(() => ({})); msg('list-msg', j.error ?? `error ${r.status}`, 'err'); }
+    }
+  });
+
+  document.getElementById('create-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const denylist = document.getElementById('c-denylist').value
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    const body = {
+      username: document.getElementById('c-username').value,
+      password: document.getElementById('c-password').value,
+      role: document.getElementById('c-role').value,
+      disabledSlashCommands: denylist,
+      mustChangePassword: true,
+    };
+    const r = await fetch('/admin/users', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      msg('create-msg', `created ${body.username}`, 'ok');
+      document.getElementById('create-form').reset();
+      render();
+    } else {
+      const j = await r.json().catch(() => ({}));
+      msg('create-msg', j.error ?? `error ${r.status}`, 'err');
+    }
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

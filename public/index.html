@@ -37,13 +37,38 @@
   <button id="connect">Connect</button>
   <button id="disconnect" class="secondary" disabled>Disconnect</button>
   <span class="status" id="status">idle</span>
+  <span id="me" style="margin-left: auto; font-size: 0.8rem; opacity: 0.75;"></span>
+  <a id="admin-link" href="/admin.html" style="color: #8fb4d8; font-size: 0.8rem; margin-left: 0.75rem; display: none;">admin</a>
+  <a id="logout-link" href="#" style="color: #8fb4d8; font-size: 0.8rem; margin-left: 0.75rem; display: none;">logout</a>
 </header>
 <div id="term"></div>
 <script src="/vendor/xterm/lib/xterm.js"></script>
 <script src="/vendor/xterm-addon-fit/lib/addon-fit.js"></script>
 <script src="/vendor/xterm-addon-web-links/lib/addon-web-links.js"></script>
 <script>
-(() => {
+(async () => {
+  // Auth gate: in users mode bounce to /login.html if not signed in.
+  try {
+    const meResp = await fetch('/auth/me');
+    const meJson = meResp.ok ? await meResp.json() : { mode: 'unknown', user: null };
+    if (meJson.mode === 'users') {
+      if (!meJson.user) { location.replace('/login.html'); return; }
+      if (meJson.user.mustChangePassword) { location.replace('/change-password.html'); return; }
+      document.getElementById('me').textContent = `${meJson.user.username} (${meJson.user.role})`;
+      document.getElementById('logout-link').style.display = '';
+      if (meJson.user.role === 'admin') document.getElementById('admin-link').style.display = '';
+    } else {
+      document.getElementById('me').textContent = 'anonymous mode';
+    }
+    document.getElementById('logout-link').addEventListener('click', async (e) => {
+      e.preventDefault();
+      await fetch('/auth/logout', { method: 'POST' });
+      location.replace('/login.html');
+    });
+  } catch (e) {
+    // Proceed — if auth is broken, the WS will reject and show an error.
+  }
+
   const { Terminal } = window;
   const FitAddon = window.FitAddon?.FitAddon ?? window.FitAddon;
   const WebLinksAddon = window.WebLinksAddon?.WebLinksAddon ?? window.WebLinksAddon;
@@ -156,7 +181,7 @@
     try { ws.send(JSON.stringify({ type: '__close' })); } catch {}
     try { ws.close(); } catch {}
   });
-})();
+})().catch((err) => { console.error('init failed', err); });
 </script>
 </body>
 </html>

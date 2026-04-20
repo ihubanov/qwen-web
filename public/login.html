@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>qwen-web · login</title>
+  <link rel="icon" href="data:," />
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; padding: 0; height: 100%; background: #0b0d12; color: #d8dee9; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    body { display: grid; place-items: center; height: 100vh; }
+    .card {
+      background: #151922;
+      border: 1px solid #2a303c;
+      border-radius: 8px;
+      padding: 1.5rem 1.75rem;
+      width: min(400px, 90vw);
+    }
+    h1 { margin: 0 0 1rem; font-size: 1.1rem; font-weight: 500; }
+    label { display: block; font-size: 0.8rem; opacity: 0.8; margin-bottom: 0.35rem; }
+    input[type=text], input[type=password] {
+      width: 100%; box-sizing: border-box;
+      background: #0b0d12; color: #d8dee9;
+      border: 1px solid #2a303c; border-radius: 4px;
+      padding: 0.55rem 0.7rem; font: inherit;
+      margin-bottom: 0.9rem;
+    }
+    button {
+      background: #2a6; color: #fff; border: 0;
+      padding: 0.55rem 1rem; border-radius: 4px;
+      cursor: pointer; font: inherit;
+      width: 100%;
+    }
+    button[disabled] { opacity: 0.5; cursor: not-allowed; }
+    .err { color: #ff7a7a; font-size: 0.8rem; min-height: 1em; margin-bottom: 0.6rem; }
+    .hint { font-size: 0.75rem; opacity: 0.6; margin-top: 1rem; }
+    .hint code { background: #0b0d12; padding: 0.05rem 0.3rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>qwen-web · sign in</h1>
+  <form id="form" autocomplete="on">
+    <div class="err" id="err"></div>
+    <label for="username">Username</label>
+    <input id="username" type="text" name="username" autocomplete="username" autofocus required />
+    <label for="password">Password</label>
+    <input id="password" type="password" name="password" autocomplete="current-password" required />
+    <button type="submit" id="submit">Sign in</button>
+  </form>
+  <div class="hint">First-boot admin password is printed to the server log.</div>
+</div>
+<script>
+(async () => {
+  // If already signed in, bounce to /.
+  try {
+    const r = await fetch('/auth/me');
+    if (r.ok) {
+      const j = await r.json();
+      if (j.mode === 'anonymous' || (j.mode === 'users' && j.user)) {
+        location.replace('/');
+        return;
+      }
+    }
+  } catch {}
+
+  const form = document.getElementById('form');
+  const err = document.getElementById('err');
+  const submit = document.getElementById('submit');
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    err.textContent = '';
+    submit.disabled = true;
+    const username = form.username.value;
+    const password = form.password.value;
+    try {
+      const r = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        err.textContent = j.error === 'invalid_credentials'
+          ? 'Invalid username or password.'
+          : `Login failed (${j.error ?? r.status}).`;
+        submit.disabled = false;
+        return;
+      }
+      const j = await r.json();
+      if (j.user?.mustChangePassword) {
+        location.replace('/change-password.html');
+      } else {
+        location.replace('/');
+      }
+    } catch (e) {
+      err.textContent = 'Network error.';
+      submit.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

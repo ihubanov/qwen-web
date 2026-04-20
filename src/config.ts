@@ -9,6 +9,17 @@ const schema = z.object({
   QWEN_BASE_SETTINGS_PATH: z.string().optional(),
   DATA_DIR: z.string().default('./data'),
   DB_PATH: z.string().default('./data/qwen-web.sqlite'),
+  AUTH_MODE: z.enum(['anonymous', 'users']).default('users'),
+  SESSION_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60 * 60 * 12),
+  ADMIN_USERNAME: z.string().default('admin'),
+  // If set, seeds the admin account with this password on first boot.
+  // Otherwise a random password is generated and printed to stderr.
+  ADMIN_INITIAL_PASSWORD: z.string().optional(),
+  ROLE_USER_DISABLED_SLASH_COMMANDS: z.string().optional(),
   COOKIE_SECRET: z.string().min(16, 'COOKIE_SECRET must be >=16 chars'),
   QWEN_AUTH_TYPE: z
     .enum(['openai', 'anthropic', 'qwen-oauth', 'gemini', 'vertex-ai'])
@@ -33,6 +44,8 @@ const schema = z.object({
 
 export type RawConfig = z.infer<typeof schema>;
 
+export type AuthMode = 'anonymous' | 'users';
+
 export interface AppConfig {
   port: number;
   host: string;
@@ -44,6 +57,13 @@ export interface AppConfig {
   settingsDir: string;
   dbPath: string;
   cookieSecret: string;
+  auth: {
+    mode: AuthMode;
+    sessionTtlSeconds: number;
+    adminUsername: string;
+    adminInitialPassword: string | null;
+  };
+  roleBaselines: { user: string[]; admin: string[] };
   upstreamAuth: {
     type: RawConfig['QWEN_AUTH_TYPE'];
     env: Record<string, string>;
@@ -77,6 +97,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     if (typeof v === 'string' && v.length > 0) upstreamEnv[key] = v;
   }
 
+  const userBaseline = (raw.ROLE_USER_DISABLED_SLASH_COMMANDS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
   return {
     port: raw.PORT,
     host: raw.HOST,
@@ -90,6 +115,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     settingsDir: resolve(dataDir, 'settings'),
     dbPath: resolve(raw.DB_PATH),
     cookieSecret: raw.COOKIE_SECRET,
+    auth: {
+      mode: raw.AUTH_MODE,
+      sessionTtlSeconds: raw.SESSION_TTL_SECONDS,
+      adminUsername: raw.ADMIN_USERNAME,
+      adminInitialPassword: raw.ADMIN_INITIAL_PASSWORD ?? null,
+    },
+    roleBaselines: { user: userBaseline, admin: [] },
     upstreamAuth: { type: raw.QWEN_AUTH_TYPE, env: upstreamEnv },
     limits: { perUser: raw.MAX_SESSIONS_PER_USER, total: raw.MAX_SESSIONS_TOTAL },
     logLevel: raw.LOG_LEVEL,
