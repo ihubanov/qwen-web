@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>qwen-web terminal</title>
+  <link rel="stylesheet" href="/vendor/xterm/css/xterm.css" />
+  <link rel="icon" href="data:," />
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; padding: 0; height: 100%; background: #0b0d12; color: #d8dee9; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    body { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+    header {
+      display: flex; gap: 0.75rem; align-items: center;
+      padding: 0.45rem 0.9rem; background: #1b1f27; border-bottom: 1px solid #2a303c;
+      font-size: 0.85rem;
+    }
+    header h1 { font-size: 0.9rem; margin: 0; font-weight: 500; }
+    header button {
+      background: #2a6; color: #fff; border: 0; padding: 0.3rem 0.75rem;
+      border-radius: 4px; cursor: pointer; font: inherit;
+    }
+    header button.secondary { background: #444c5c; }
+    header button[disabled] { opacity: 0.45; cursor: not-allowed; }
+    header .status { opacity: 0.75; }
+    #term {
+      padding: 0.25rem;
+      background: #000;
+    }
+    #term .xterm-viewport::-webkit-scrollbar { width: 10px; }
+    #term .xterm-viewport::-webkit-scrollbar-thumb { background: #2a303c; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>qwen-web</h1>
+  <button id="connect">Connect</button>
+  <button id="disconnect" class="secondary" disabled>Disconnect</button>
+  <span class="status" id="status">idle</span>
+</header>
+<div id="term"></div>
+<script src="/vendor/xterm/lib/xterm.js"></script>
+<script src="/vendor/xterm-addon-fit/lib/addon-fit.js"></script>
+<script src="/vendor/xterm-addon-web-links/lib/addon-web-links.js"></script>
+<script>
+(() => {
+  const { Terminal } = window;
+  const FitAddon = window.FitAddon?.FitAddon ?? window.FitAddon;
+  const WebLinksAddon = window.WebLinksAddon?.WebLinksAddon ?? window.WebLinksAddon;
+
+  const $ = (id) => document.getElementById(id);
+  const termEl = $('term');
+  const statusEl = $('status');
+  const connectBtn = $('connect');
+  const disconnectBtn = $('disconnect');
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    fontSize: 13,
+    lineHeight: 1.15,
+    theme: {
+      background: '#000000',
+      foreground: '#d8dee9',
+      cursor: '#ffd37d',
+    },
+    allowProposedApi: true,
+    convertEol: false,
+    scrollback: 10000,
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon());
+  term.open(termEl);
+  fit.fit();
+  term.writeln('\x1b[90m[qwen-web] idle — click Connect to start a session.\x1b[0m');
+
+  let ws = null;
+  let ready = false;
+
+  const setStatus = (text) => { statusEl.textContent = text; };
+  const setConnected = (connected) => {
+    connectBtn.disabled = connected;
+    disconnectBtn.disabled = !connected;
+  };
+
+  const sendResize = () => {
+    if (!ws || ws.readyState !== 1 || !ready) return;
+    ws.send(JSON.stringify({ type: '__resize', cols: term.cols, rows: term.rows }));
+  };
+
+  window.addEventListener('resize', () => {
+    fit.fit();
+    sendResize();
+  });
+
+  term.onData((data) => {
+    if (!ws || ws.readyState !== 1 || !ready) return;
+    ws.send(new TextEncoder().encode(data));
+  });
+
+  connectBtn.addEventListener('click', () => {
+    if (ws) return;
+    fit.fit();
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/session';
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+    setStatus('connecting…');
+
+    ws.addEventListener('open', () => {
+      ws.send(JSON.stringify({
+        type: '__start',
+        cols: term.cols,
+        rows: term.rows,
+      }));
+      setStatus('waiting for pty…');
+      setConnected(true);
+    });
+
+    ws.addEventListener('message', (ev) => {
+      if (typeof ev.data === 'string') {
+        // Control frame — always JSON from the server.
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg?.type !== '__meta') return;
+        if (msg.kind === 'ready') {
+          ready = true;
+          setStatus(`session ${String(msg.sessionId).slice(0, 8)}`);
+          term.focus();
+        } else if (msg.kind === 'exit') {
+          term.writeln(`\r\n\x1b[90m[qwen-web] pty exited code=${msg.code} signal=${msg.signal ?? '—'}\x1b[0m`);
+        } else if (msg.kind === 'error') {
+          term.writeln(`\r\n\x1b[31m[qwen-web] error: ${msg.message}\x1b[0m`);
+        }
+        return;
+      }
+      // Binary frame — raw PTY output bytes.
+      const decoded = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(ev.data));
+      term.write(decoded);
+    });
+
+    ws.addEventListener('close', () => {
+      ws = null;
+      ready = false;
+      setConnected(false);
+      setStatus('idle');
+    });
+
+    ws.addEventListener('error', () => {
+      term.writeln('\r\n\x1b[31m[qwen-web] websocket error\x1b[0m');
+    });
+  });
+
+  disconnectBtn.addEventListener('click', () => {
+    if (!ws) return;
+    try { ws.send(JSON.stringify({ type: '__close' })); } catch {}
+    try { ws.close(); } catch {}
+  });
+})();
+</script>
+</body>
+</html>

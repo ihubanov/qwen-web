@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+.spike-home/
+.spike-workspace/
+*.log
+.env
+.env.local
+.DS_Store
